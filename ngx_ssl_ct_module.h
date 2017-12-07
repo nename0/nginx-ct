@@ -44,3 +44,4 @@ void *ngx_ssl_ct_create_srv_conf(ngx_conf_t *cf);
 char *ngx_ssl_ct_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child,
     SSL_CTX *ssl_ctx, ngx_array_t *certificates);
 
+#endif
