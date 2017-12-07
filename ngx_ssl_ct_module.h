@@ -22,6 +22,7 @@
 
 #define NGX_SSL_CT_EXT 18 /* from RFC 6962 */
 #define NGX_SSL_CT_EXT_MAX_LEN 0xFFFF
+#define NGX_SSL_CT_OCSP_MAX_LEN 5000
 #define ngx_strrchr(s1, c) strrchr((const char *) s1, (int) c)
 
 typedef struct {
@@ -32,22 +33,14 @@ typedef struct {
 typedef struct {
     u_char buf[NGX_SSL_CT_EXT_MAX_LEN];
     size_t len;
+    u_char ocspResp[NGX_SSL_CT_OCSP_MAX_LEN];
+    size_t ocspRespLen;
 } ngx_ssl_ct_ext;
 
 ngx_int_t ngx_ssl_ct_init(ngx_log_t *log);
-#ifndef OPENSSL_IS_BORINGSSL
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
-int ngx_ssl_ct_ext_cb(SSL *s, unsigned int ext_type, unsigned int context,
-    const unsigned char **out, size_t *outlen, X509 *x, size_t chainidx,
-    int *al, void *add_arg);
-#  else
-int ngx_ssl_ct_ext_cb(SSL *s, unsigned int ext_type, const unsigned char **out,
-    size_t *outlen, int *al, void *add_arg);
-#  endif
-#endif
+
 ngx_ssl_ct_ext *ngx_ssl_ct_read_static_scts(ngx_conf_t *cf, ngx_str_t *path);
 void *ngx_ssl_ct_create_srv_conf(ngx_conf_t *cf);
 char *ngx_ssl_ct_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child,
     SSL_CTX *ssl_ctx, ngx_array_t *certificates);
 
-#endif

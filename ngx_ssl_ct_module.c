@@ -16,10 +16,15 @@
 
 #include "ngx_ssl_ct_module.h"
 
-static int ngx_ssl_ct_sct_list_index;
+#ifndef OPENSSL_IS_BORINGSSL
+#error Only BoringSSL builds are supported
+#endif
 
 static void *ngx_ssl_ct_create_conf(ngx_cycle_t *cycle);
 static ngx_ssl_ct_ext *ngx_ssl_ct_read_static_sct(ngx_conf_t *cf,
+    ngx_str_t *dir, u_char *file, size_t file_len,
+    ngx_ssl_ct_ext *sct_list);
+static ngx_ssl_ct_ext *ngx_ssl_ct_read_ocsp_resp(ngx_conf_t *cf,
     ngx_str_t *dir, u_char *file, size_t file_len,
     ngx_ssl_ct_ext *sct_list);
 
@@ -46,14 +51,6 @@ ngx_module_t ngx_ssl_ct_module = {
 };
 
 static void *ngx_ssl_ct_create_conf(ngx_cycle_t *cycle) {
-    ngx_ssl_ct_sct_list_index = X509_get_ex_new_index(0, NULL, NULL, NULL,
-        NULL);
-
-    if (ngx_ssl_ct_sct_list_index == -1) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-            "X509_get_ex_new_index failed");
-        return NULL;
-    }
 
     return ngx_palloc(cycle->pool, 0);
 }
@@ -128,14 +125,18 @@ char *ngx_ssl_ct_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child,
             goto next;
         }
 
-#ifndef OPENSSL_IS_BORINGSSL
-        /* associate the sct_list with the cert */
-        X509_set_ex_data(cert, ngx_ssl_ct_sct_list_index, sct_list);
-#else
         if (SSL_CTX_set_signed_cert_timestamp_list(ssl_ctx, sct_list->buf,
             sct_list->len) == 0) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                 "SSL_CTX_set_signed_cert_timestamp_list failed");
+            ngx_pfree(cf->pool, sct_list);
+            return NGX_CONF_ERROR;
+        }
+
+        if (sct_list->ocspRespLen > 0 && 
+            SSL_CTX_set_ocsp_response(ssl_ctx, sct_list->ocspResp, sct_list->ocspRespLen) == 0) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                "SSL_CTX_set_ocsp_response failed");
             ngx_pfree(cf->pool, sct_list);
             return NGX_CONF_ERROR;
         }
@@ -147,91 +148,16 @@ char *ngx_ssl_ct_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child,
                 "directory will be used for all certificates");
         }
 
+        ngx_pfree(cf->pool, sct_list);
+
         break;
-#endif
 
 next:
-#if nginx_version >= 1011000
         cert = X509_get_ex_data(cert, ngx_ssl_next_certificate_index);
-#else
-        break;
-#endif
     }
-
-#ifndef OPENSSL_IS_BORINGSSL
-    /* add OpenSSL TLS extension */
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
-    int context = SSL_EXT_CLIENT_HELLO
-                | SSL_EXT_TLS1_2_SERVER_HELLO
-                | SSL_EXT_TLS1_3_CERTIFICATE;
-    if (SSL_CTX_add_custom_ext(ssl_ctx, NGX_SSL_CT_EXT, context,
-        &ngx_ssl_ct_ext_cb, NULL, NULL, NULL, NULL) == 0) {
-        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-            "SSL_CTX_add_custom_ext failed");
-        return NGX_CONF_ERROR;
-    }
-#  else
-    if (SSL_CTX_add_server_custom_ext(ssl_ctx, NGX_SSL_CT_EXT,
-        &ngx_ssl_ct_ext_cb, NULL, NULL, NULL, NULL) == 0) {
-        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-            "SSL_CTX_add_server_custom_ext failed");
-        return NGX_CONF_ERROR;
-    }
-#  endif
-#endif
 
     return NGX_CONF_OK;
 }
-
-#ifndef OPENSSL_IS_BORINGSSL
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
-int ngx_ssl_ct_ext_cb(SSL *s, unsigned int ext_type, unsigned int context,
-    const unsigned char **out, size_t *outlen, X509 *x, size_t chainidx,
-    int *al, void *add_arg) {
-    /* only include SCTs in the end-entity certificate */
-    if (context == SSL_EXT_TLS1_3_CERTIFICATE && chainidx != 0) {
-        return 0;
-    }
-#  else
-int ngx_ssl_ct_ext_cb(SSL *s, unsigned int ext_type, const unsigned char **out,
-    size_t *outlen, int *al, void *add_arg) {
-    X509 *x = NULL;
-#  endif
-
-    if (!x) {
-        /* get the cert OpenSSL chose to use for this connection */
-        int result = SSL_set_current_cert(s, SSL_CERT_SET_SERVER);
-        if (result == 2) {
-            /*
-             * Anonymous/PSK cipher suites don't use certificates, so don't attempt
-             * to add the SCT extension to the ServerHello.
-             */
-            return 0;
-        } else if (result != 1) {
-            ngx_connection_t *c = ngx_ssl_get_connection(s);
-            ngx_log_error(NGX_LOG_WARN, c->log, 0, "SSL_set_current_cert failed");
-            return -1;
-        }
-
-        x = SSL_get_certificate(s);
-        if (!x) {
-            /* as above */
-            return 0;
-        }
-    }
-
-    /* get sct_list for the cert OpenSSL chose to use for this connection */
-    ngx_ssl_ct_ext *sct_list = X509_get_ex_data(x, ngx_ssl_ct_sct_list_index);
-
-    if (sct_list) {
-        *out    = sct_list->buf;
-        *outlen = sct_list->len;
-        return 1;
-    } else {
-        return 0;
-    }
-}
-#endif
 
 static ngx_ssl_ct_ext *ngx_ssl_ct_read_static_sct(ngx_conf_t *cf,
     ngx_str_t *dir, u_char *file, size_t file_len,
@@ -319,6 +245,81 @@ out:
     return sct_list;
 }
 
+static ngx_ssl_ct_ext *ngx_ssl_ct_read_ocsp_resp(ngx_conf_t *cf,
+    ngx_str_t *dir, u_char *file, size_t file_len,
+    ngx_ssl_ct_ext *sct_list) {
+    int ok = 0;
+
+    /* join dir and file name */
+    size_t path_len = dir->len + file_len + 2;
+    u_char *path = ngx_pcalloc(cf->pool, path_len);
+    if (path == NULL) {
+        return NULL;
+    }
+
+    u_char *path_end = ngx_cpystrn(path, dir->data, dir->len + 1);
+    *path_end++ = '/';
+    ngx_cpystrn(path_end, file, file_len + 1);
+
+    /* open file */
+    ngx_fd_t fd = ngx_open_file(path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
+            ngx_open_file_n " \"%s\" failed", path);
+        ngx_pfree(cf->pool, path);
+        return NULL;
+    }
+
+    /* get file size */
+    ngx_file_info_t stat;
+    if (ngx_fd_info(fd, &stat) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
+            ngx_fd_info_n " \"%s\" failed", path);
+        goto out;
+    }
+
+    const size_t resp_len = ngx_file_size(&stat);
+    if (resp_len == 0) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
+            ngx_fd_info_n " \"%s\" empty", path);
+        goto out;
+    }
+
+    if (resp_len > NGX_SSL_CT_OCSP_MAX_LEN) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+            "ocsp.der exceeds maximum length");
+        goto out;
+    }
+    sct_list->ocspRespLen = resp_len;
+
+    /* read the response from disk */
+    size_t pos = 0;
+    while (pos < resp_len) {
+        ssize_t n = ngx_read_fd(fd, sct_list->ocspResp + pos, resp_len - pos);
+        if (n == NGX_FILE_ERROR) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
+                ngx_read_fd_n " \"%s\" failed", path);
+            goto out;
+        }
+
+        pos += n;
+    }
+
+    ok = 1;
+
+out:
+    if (ngx_close_file(fd) != NGX_OK) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
+            ngx_close_file_n " \"%s\" failed", path);
+    }
+    ngx_pfree(cf->pool, path);
+
+    if (!ok) {
+        return NULL;
+    }
+    return sct_list;
+}
+
 ngx_ssl_ct_ext *ngx_ssl_ct_read_static_scts(ngx_conf_t *cf, ngx_str_t *path) {
     /* resolve relative paths */
     if (ngx_conf_full_name(cf->cycle, path, 1) != NGX_OK) {
@@ -335,6 +336,7 @@ ngx_ssl_ct_ext *ngx_ssl_ct_read_static_scts(ngx_conf_t *cf, ngx_str_t *path) {
 
     /* reserve the first two bytes for the length */
     sct_list->len += 2;
+    sct_list->ocspRespLen = 0;
 
     /* open directory */
     ngx_dir_t dir;
@@ -367,6 +369,14 @@ ngx_ssl_ct_ext *ngx_ssl_ct_read_static_scts(ngx_conf_t *cf, ngx_str_t *path) {
         u_char *file = ngx_de_name(&dir);
         if (file[0] == '.') {
             continue;
+        }
+
+        if (ngx_strcmp(file, "ocsp.der") == 0) {
+            if (!ngx_ssl_ct_read_ocsp_resp(cf, path, file, file_len, sct_list)) {
+                /* ngx_ssl_ct_read_ocsp_resp calls ngx_log_error */
+                ngx_pfree(cf->pool, sct_list);
+                return NULL;
+            }
         }
 
         /* skip files unless the extension is .sct */
