@@ -139,6 +139,9 @@ char *ngx_ssl_ct_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child,
                 "SSL_CTX_set_ocsp_response failed");
             ngx_pfree(cf->pool, sct_list);
             return NGX_CONF_ERROR;
+        } else {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                "SSL_CTX_set_ocsp_response success");
         }
 
         if (conf->sct_dirs->nelts > 1) {
@@ -372,6 +375,8 @@ ngx_ssl_ct_ext *ngx_ssl_ct_read_static_scts(ngx_conf_t *cf, ngx_str_t *path) {
         }
 
         if (ngx_strcmp(file, "ocsp.der") == 0) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                "ocsp.der found");
             if (!ngx_ssl_ct_read_ocsp_resp(cf, path, file, file_len, sct_list)) {
                 /* ngx_ssl_ct_read_ocsp_resp calls ngx_log_error */
                 ngx_pfree(cf->pool, sct_list);
